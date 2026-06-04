@@ -14,7 +14,7 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import base64
-from imap_tools import MailBox, MailMessageFlags, MailboxLoginError
+from imap_tools import MailBox, MailMessageFlags, MailboxLoginError, A
 
 # Setup Logging to stdout for Docker compatibility (unbuffered)
 logging.basicConfig(
@@ -295,7 +295,7 @@ def sync_emails(mailbox_conn, folder_name, maildir_path, state_db, imap_action):
         try:
             # Fetch message objects (fetch raw RFC822 bytes parsing to Email message)
             # mark_seen=False guarantees we don't change unread states unless requested.
-            for msg in mailbox_conn.fetch(uids=chunk, mark_seen=False):
+            for msg in mailbox_conn.fetch(A(uid=chunk), mark_seen=False):
                 if exit_requested:
                     break
                     
