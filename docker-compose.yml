@@ -1,0 +1,20 @@
+services:
+  gmail-sync:
+    image: skyma3x/gmail-imap-sync:latest
+    container_name: gmail-imap-sync
+    restart: unless-stopped
+    
+    # Optional: Override the default non-root user (UID 1000) to match host folder owner
+    # user: "1001:1001"
+    
+    environment:
+      # Optional: Define your secret key here if you chose to encrypt 'app_password' in config.json.
+      # If using plain-text credentials, you can safely remove or comment this line.
+      - SYNC_ENCRYPTION_KEY=my-super-secret-encryption-passphrase
+      
+    volumes:
+      # Mount your configuration file (read-only for security)
+      - ./config/config.json:/config/config.json:ro
+      
+      # Mount directory for the synchronized maildir directly
+      - ./maildir/marco@mydomain.com:/data

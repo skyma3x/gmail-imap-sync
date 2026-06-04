@@ -1,0 +1,9 @@
+{
+  "imap_host": "imap.gmail.com",
+  "email": "your_email@gmail.com",
+  "app_password": "your_app_password_or_encrypted_string",
+  "label": "INBOX",
+  "maildir_path": "/data",
+  "retry_interval_minutes": 5,
+  "imap_action": "keep"
+}

@@ -1,0 +1,2 @@
+imap-tools>=1.16.0
+cryptography>=42.0.0
