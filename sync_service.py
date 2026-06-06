@@ -224,20 +224,15 @@ def find_trash_folder(mailbox_conn):
         logger.error(f"Error checking folders for Trash: {e}")
     return None
 
-def sync_emails(mailbox_conn, folder_name, maildir_path, state_db, imap_action):
+def sync_emails(mailbox_conn, folder_name, maildir_path, state_db, imap_action, move_to_folder="", search_criteria="unseen"):
     """Fetches unsynced messages from the server, stores them in Maildir, and runs post-sync actions."""
     global exit_requested
     
-    logger.info(f"Selecting folder: '{folder_name}'")
-    try:
-        mailbox_conn.folder.set(folder_name)
-    except Exception as e:
-        logger.error(f"Failed to select folder '{folder_name}' on IMAP server: {e}")
-        return False
+    logger.info(f"Syncing folder: '{folder_name}'")
         
     # Retrieve UIDVALIDITY
     try:
-        status_info = mailbox_conn.folder.status(folder_name)
+        status_info = mailbox_conn.folder.status()
         current_uid_validity = status_info.get('UIDVALIDITY', 0)
     except Exception as e:
         logger.warning(f"Error fetching folder status: {e}. Using default UIDVALIDITY 0.")
@@ -253,9 +248,14 @@ def sync_emails(mailbox_conn, folder_name, maildir_path, state_db, imap_action):
         logger.error(f"Failed to initialize Maildir at '{maildir_path}': {e}")
         return False
         
-    # Retrieve all server UIDs for the folder
+    # Retrieve server UIDs based on search_criteria
     try:
-        all_server_uids = mailbox_conn.uids()
+        if search_criteria == "unseen":
+            all_server_uids = mailbox_conn.uids(A(seen=False))
+            logger.info(f"Searching for UNSEEN messages only in '{folder_name}'.")
+        else:
+            all_server_uids = mailbox_conn.uids()
+            logger.info(f"Searching for ALL messages in '{folder_name}'.")
     except Exception as e:
         logger.error(f"Failed to retrieve message UIDs from folder '{folder_name}': {e}")
         return False
@@ -315,6 +315,9 @@ def sync_emails(mailbox_conn, folder_name, maildir_path, state_db, imap_action):
                             mailbox_conn.move(msg.uid, trash_folder_name)
                         else:
                             mailbox_conn.delete(msg.uid)
+                    elif imap_action == 'move':
+                        mailbox_conn.flag(msg.uid, MailMessageFlags.SEEN, True)
+                        mailbox_conn.move(msg.uid, move_to_folder)
                             
                 except Exception as e:
                     logger.error(f"Failed to save message UID {msg.uid}: {e}")
@@ -358,16 +361,35 @@ def load_config(config_path):
     config.setdefault("label", "INBOX")
     config.setdefault("maildir_path", "/data")
     config.setdefault("retry_interval_minutes", 5)
-    config.setdefault("imap_action", "keep")
+    config.setdefault("imap_action", "read")
+    config.setdefault("move_to_folder", "")
+    config.setdefault("search_criteria", "unseen")
     
     # Validate imap_action
-    valid_actions = ["keep", "read", "trash"]
+    valid_actions = ["keep", "read", "trash", "move"]
     if config["imap_action"] not in valid_actions:
         logger.warning(
             f"Invalid imap_action '{config['imap_action']}'. "
-            f"Falling back to default 'keep'. (Allowed values: {', '.join(valid_actions)})"
+            f"Falling back to default 'read'. (Allowed values: {', '.join(valid_actions)})"
         )
-        config["imap_action"] = "keep"
+        config["imap_action"] = "read"
+    
+    # Validate move_to_folder is set when imap_action is 'move'
+    if config["imap_action"] == "move" and not config["move_to_folder"]:
+        logger.critical(
+            "imap_action is 'move' but 'move_to_folder' is not specified. "
+            "Please set 'move_to_folder' in config.json."
+        )
+        sys.exit(1)
+    
+    # Validate search_criteria
+    valid_criteria = ["all", "unseen"]
+    if config["search_criteria"] not in valid_criteria:
+        logger.warning(
+            f"Invalid search_criteria '{config['search_criteria']}'. "
+            f"Falling back to default 'unseen'. (Allowed values: {', '.join(valid_criteria)})"
+        )
+        config["search_criteria"] = "unseen"
         
     return config
 
@@ -401,6 +423,8 @@ def run_service(config):
     maildir_path = config["maildir_path"]
     retry_interval_minutes = config["retry_interval_minutes"]
     imap_action = config["imap_action"]
+    move_to_folder = config.get("move_to_folder", "")
+    search_criteria = config.get("search_criteria", "unseen")
     
     app_password = get_decrypted_password(config)
     
@@ -422,11 +446,11 @@ def run_service(config):
         logger.info(f"Connecting to IMAP host {imap_host}...")
         try:
             # Login and select folder
-            with MailBox(imap_host).login(email, app_password) as mailbox_conn:
-                logger.info("IMAP Login successful.")
+            with MailBox(imap_host).login(email, app_password, initial_folder=label) as mailbox_conn:
+                logger.info(f"IMAP Login successful. Selected folder: '{label}'")
                 
                 # Force initial synchronization
-                sync_success = sync_emails(mailbox_conn, label, maildir_path, state_db, imap_action)
+                sync_success = sync_emails(mailbox_conn, label, maildir_path, state_db, imap_action, move_to_folder, search_criteria)
                 if not sync_success:
                     logger.warning("Initial sync failed. Will retry inside daemon loop.")
                 
@@ -446,7 +470,7 @@ def run_service(config):
                         responses = mailbox_conn.idle.wait(timeout=10)
                         if responses:
                             logger.info("IMAP IDLE notification received. Syncing...")
-                            sync_emails(mailbox_conn, label, maildir_path, state_db, imap_action)
+                            sync_emails(mailbox_conn, label, maildir_path, state_db, imap_action, move_to_folder, search_criteria)
                     except (socket.timeout, TimeoutError):
                         # standard timeout without events
                         continue

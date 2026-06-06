@@ -5,5 +5,7 @@
   "label": "INBOX",
   "maildir_path": "/data",
   "retry_interval_minutes": 5,
-  "imap_action": "keep"
+  "imap_action": "read",
+  "move_to_folder": "",
+  "search_criteria": "unseen"
 }

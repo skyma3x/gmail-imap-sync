@@ -10,7 +10,8 @@ A lightweight, robust, containerized Python service that connects to Gmail via I
 - **Fail-Safe Startup**: Errors such as missing configs or authentication issues stop the container immediately (fail-fast).
 - **Network Resilience**: Reconnection loop handles network dropouts or timeouts, retrying periodically (default: 5 minutes).
 - **SQLite State Tracking**: Tracks downloaded message UIDs in an SQLite database (`.sync_state.db`) stored inside the Maildir directory. Survives restarts and prevents duplicates.
-- **Post-Sync Actions**: Supports leaving messages untouched, marking them read, or moving them to trash on the IMAP server.
+- **Post-Sync Actions**: Supports leaving messages untouched, marking them read, moving them to trash, or moving them to a custom folder (marked as read) on the IMAP server.
+- **Flexible Search**: Choose between syncing all messages in a folder or only unread ones.
 - **Graceful Shutdown**: Properly intercepts `SIGTERM` and `SIGINT` signals for safe daemon shutdowns.
 - **Rootless & Secure**: Designed to run as a non-root user (`appuser`, UID/GID `1000`) by default, and fully supports user overriding via standard Docker user flags.
 - **Credential Protection**: Supports both plain text and encrypted credentials (using AES-128 via Fernet) with a dedicated CLI encryption helper.
@@ -33,7 +34,9 @@ Here is an example structure. You can use the provided [config.json.example](con
   "label": "INBOX",
   "maildir_path": "/data/maildir",
   "retry_interval_minutes": 5,
-  "imap_action": "keep"
+  "imap_action": "read",
+  "move_to_folder": "",
+  "search_criteria": "unseen"
 }
 ```
 
@@ -47,7 +50,9 @@ Here is an example structure. You can use the provided [config.json.example](con
 | `label` | String | `INBOX` | GMail folder/label to sync. |
 | `maildir_path` | String | `/data` | Destination path where the Maildir structure will be built. (By defaulting to `/data`, the mountpoint itself becomes the Maildir). |
 | `retry_interval_minutes` | Integer | `5` | Minutes to wait before retrying the connection after network drops. |
-| `imap_action` | String | `keep` | Action to run on server after sync. Options: `keep` (do nothing), `read` (mark as read), `trash` (move to Trash folder, or delete as fallback). |
+| `imap_action` | String | `read` | Action to run on server after sync. Options: `keep` (do nothing), `read` (mark as read), `trash` (move to Trash folder, or delete as fallback), `move` (mark as read and move to folder specified in `move_to_folder`). |
+| `move_to_folder` | String | `""` | IMAP destination folder for the `move` action (e.g. `"INBOX/Archived"`, `"[Gmail]/All Mail"`). Required when `imap_action` is `move`. |
+| `search_criteria` | String | `unseen` | Controls which messages to sync. Options: `unseen` (only unread messages), `all` (all messages in the folder). |
 
 ### Understanding `maildir_path` & Volume Mounting
 
@@ -152,15 +157,3 @@ docker run -d \
   -v /path/to/host/maildir:/data \
   gmail-imap-sync
 ```
-
----
-
-## CI/CD and GitHub Actions
-
-A workflow is provided in [.github/workflows/docker-build-push.yml](.github/workflows/docker-build-push.yml) to automatically compile and deploy the container to Docker Hub on changes.
-
-### Required GitHub Secrets
-
-To make the workflow run successfully, go to your GitHub Repository Settings -> Secrets and Variables -> Actions, and add:
-- `DOCKER_USERNAME`: Your Docker Hub username.
-- `DOCKER_PASSWORD`: Your Docker Hub access token (recommended) or password.
