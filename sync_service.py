@@ -10,11 +10,14 @@ import logging
 import mailbox
 import socket
 import ssl
+import threading
+import uvicorn
+from fastapi import FastAPI
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import base64
-from imap_tools import MailBox, MailMessageFlags, MailboxLoginError, A
+from imap_tools import MailBox, MailMessageFlags, MailboxLoginError, A, MailboxTaggedResponseError
 
 # Setup Logging to stdout for Docker compatibility (unbuffered)
 logging.basicConfig(
@@ -26,6 +29,9 @@ logger = logging.getLogger("gmail-imap-sync")
 
 # Global exit flag
 exit_requested = False
+
+# Global sync lock to prevent concurrent sync operations
+sync_lock = threading.Lock()
 
 def handle_signal(signum, frame):
     global exit_requested
@@ -128,7 +134,7 @@ class StateDatabase:
         
     def init_db(self):
         try:
-            self.conn = sqlite3.connect(self.db_path)
+            self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
             # Enable WAL mode for better concurrency and write performance
             self.conn.execute("PRAGMA journal_mode=WAL;")
             with self.conn:
@@ -361,9 +367,24 @@ def load_config(config_path):
     config.setdefault("label", "INBOX")
     config.setdefault("maildir_path", "/data")
     config.setdefault("retry_interval_minutes", 5)
+    config.setdefault("sync_mode", "idle")
+    config.setdefault("idle_fallback", True)
+    config.setdefault("idle_refresh_interval_minutes", 20)
+    config.setdefault("polling_interval_minutes", 5)
+    config.setdefault("http_endpoint_enabled", False)
+    config.setdefault("http_endpoint_port", 5000)
     config.setdefault("imap_action", "read")
     config.setdefault("move_to_folder", "")
     config.setdefault("search_criteria", "unseen")
+    
+    # Validate sync_mode
+    valid_sync_modes = ["idle", "polling"]
+    if config["sync_mode"] not in valid_sync_modes:
+        logger.warning(
+            f"Invalid sync_mode '{config['sync_mode']}'. "
+            f"Falling back to default 'idle'. (Allowed values: {', '.join(valid_sync_modes)})"
+        )
+        config["sync_mode"] = "idle"
     
     # Validate imap_action
     valid_actions = ["keep", "read", "trash", "move"]
@@ -439,8 +460,40 @@ def run_service(config):
     db_path = os.path.join(maildir_path, ".sync_state.db")
     state_db = StateDatabase(db_path)
     
+    # Initialize HTTP Endpoint if enabled
+    if config.get("http_endpoint_enabled"):
+        app = FastAPI(title="Gmail IMAP Sync API")
+        
+        @app.get("/start-sync")
+        def start_sync():
+            if not sync_lock.acquire(blocking=False):
+                return {"status": "ignored", "message": "Synchronization is already in progress."}
+                
+            def run_manual_sync():
+                try:
+                    logger.info("Manual sync triggered via HTTP endpoint.")
+                    with MailBox(imap_host).login(email, app_password, initial_folder=label) as mailbox_conn:
+                        sync_emails(mailbox_conn, label, maildir_path, state_db, imap_action, move_to_folder, search_criteria)
+                    logger.info("Manual sync completed.")
+                except Exception as e:
+                    logger.error(f"Manual sync failed: {e}")
+                finally:
+                    sync_lock.release()
+                    
+            threading.Thread(target=run_manual_sync, daemon=True).start()
+            return {"status": "started", "message": "Manual synchronization triggered."}
+            
+        def run_uvicorn():
+            port = int(config.get("http_endpoint_port", 5000))
+            logger.info(f"Starting HTTP endpoint on port {port}")
+            uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+            
+        threading.Thread(target=run_uvicorn, daemon=True).start()
+    
     retry_seconds = int(retry_interval_minutes) * 60
     logger.info(f"Syncing Gmail IMAP folder '{label}' to local Maildir '{maildir_path}'")
+    
+    current_mode = config["sync_mode"]
     
     while not exit_requested:
         logger.info(f"Connecting to IMAP host {imap_host}...")
@@ -450,33 +503,65 @@ def run_service(config):
                 logger.info(f"IMAP Login successful. Selected folder: '{label}'")
                 
                 # Force initial synchronization
-                sync_success = sync_emails(mailbox_conn, label, maildir_path, state_db, imap_action, move_to_folder, search_criteria)
-                if not sync_success:
-                    logger.warning("Initial sync failed. Will retry inside daemon loop.")
-                
-                # Refreshes connection every 20 minutes to prevent socket dropouts
-                idle_refresh_interval = 20 * 60
-                connection_start_time = time.time()
-                
-                logger.info(f"Entering IMAP IDLE real-time listen mode on label '{label}'...")
-                
-                while not exit_requested:
-                    if time.time() - connection_start_time > idle_refresh_interval:
-                        logger.info("Refreshing connection to prevent IMAP idle timeout...")
-                        break
-                        
+                if sync_lock.acquire(blocking=False):
                     try:
-                        # Wait for server notifications (10 seconds timeout allows responsive signal checks)
-                        responses = mailbox_conn.idle.wait(timeout=10)
-                        if responses:
-                            logger.info("IMAP IDLE notification received. Syncing...")
-                            sync_emails(mailbox_conn, label, maildir_path, state_db, imap_action, move_to_folder, search_criteria)
-                    except (socket.timeout, TimeoutError):
-                        # standard timeout without events
-                        continue
-                    except Exception as e:
-                        logger.warning(f"Connection issue encountered inside IDLE loop: {e}")
-                        raise
+                        sync_success = sync_emails(mailbox_conn, label, maildir_path, state_db, imap_action, move_to_folder, search_criteria)
+                        if not sync_success:
+                            logger.warning("Initial sync failed. Will retry inside daemon loop.")
+                    finally:
+                        sync_lock.release()
+                else:
+                    logger.info("Sync already in progress (manual). Skipping initial daemon sync.")
+                
+                current_mode = config["sync_mode"] # Reset to configured mode each connection
+                
+                if current_mode == "polling":
+                    logger.info("Polling sync complete. Disconnecting from IMAP server until next interval...")
+                    # Do nothing, let the 'with' block exit to gracefully close the connection
+                else:
+                    # Refreshes connection to prevent socket dropouts
+                    idle_refresh_interval = int(config["idle_refresh_interval_minutes"]) * 60
+                    connection_start_time = time.time()
+                    
+                    logger.info(f"Entering IMAP IDLE real-time listen mode on label '{label}'...")
+                    
+                    while not exit_requested:
+                        if time.time() - connection_start_time > idle_refresh_interval:
+                            logger.info("Refreshing connection to prevent IMAP idle timeout...")
+                            break
+                            
+                        try:
+                            # Wait for server notifications (10 seconds timeout allows responsive signal checks)
+                            responses = mailbox_conn.idle.wait(timeout=10)
+                            if responses:
+                                logger.info("IMAP IDLE notification received. Syncing...")
+                                if sync_lock.acquire(blocking=False):
+                                    try:
+                                        sync_emails(mailbox_conn, label, maildir_path, state_db, imap_action, move_to_folder, search_criteria)
+                                    finally:
+                                        sync_lock.release()
+                                else:
+                                    logger.info("Sync already in progress (manual). Skipping IDLE daemon sync.")
+                        except (socket.timeout, TimeoutError):
+                            # standard timeout without events
+                            continue
+                        except MailboxTaggedResponseError as e:
+                            # If IDLE is not supported, it throws this specific error
+                            if getattr(e, 'command_result', None) and len(e.command_result) > 1 and e.command_result[1] in (b'IDLE start', 'IDLE start'):
+                                if config["idle_fallback"]:
+                                    logger.warning(f"IMAP IDLE is not supported by the server. Falling back to polling mode. (Error: {e})")
+                                    current_mode = "polling"
+                                    break # exit IDLE loop, will fall through to polling sleep
+                                else:
+                                    logger.critical(f"IMAP IDLE is not supported by the server and fallback is disabled. Exiting. (Error: {e})")
+                                    state_db.close()
+                                    sys.exit(1)
+                            else:
+                                logger.warning(f"Unexpected tagged response error inside IDLE loop: {e}")
+                                raise
+                        except Exception as e:
+                            logger.warning(f"Connection issue encountered inside IDLE loop: {e}")
+                            raise
                         
         except MailboxLoginError as e:
             # Fatal error (wrong credentials, App Password required, etc.) -> fail-fast
@@ -497,6 +582,7 @@ def run_service(config):
             while sleep_elapsed < retry_seconds and not exit_requested:
                 time.sleep(5)
                 sleep_elapsed += 5
+            continue # jump to top of while loop, skipping polling sleep
                 
         except Exception as e:
             logger.error(f"Unexpected technical error: {e}")
@@ -506,6 +592,16 @@ def run_service(config):
             logger.info(f"Retrying connection in {retry_interval_minutes} minutes ({retry_seconds}s)...")
             sleep_elapsed = 0
             while sleep_elapsed < retry_seconds and not exit_requested:
+                time.sleep(5)
+                sleep_elapsed += 5
+            continue # jump to top of while loop, skipping polling sleep
+            
+        # Wait for the polling interval if in polling mode
+        if not exit_requested and current_mode == "polling":
+            polling_seconds = int(config["polling_interval_minutes"]) * 60
+            logger.info(f"Polling mode: Waiting {config['polling_interval_minutes']} minutes before next sync...")
+            sleep_elapsed = 0
+            while sleep_elapsed < polling_seconds and not exit_requested:
                 time.sleep(5)
                 sleep_elapsed += 5
                 

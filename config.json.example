@@ -5,6 +5,12 @@
   "label": "INBOX",
   "maildir_path": "/data",
   "retry_interval_minutes": 5,
+  "sync_mode": "idle",
+  "idle_fallback": true,
+  "idle_refresh_interval_minutes": 20,
+  "polling_interval_minutes": 5,
+  "http_endpoint_enabled": false,
+  "http_endpoint_port": 5000,
   "imap_action": "read",
   "move_to_folder": "",
   "search_criteria": "unseen"

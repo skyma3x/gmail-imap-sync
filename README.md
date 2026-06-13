@@ -34,6 +34,12 @@ Here is an example structure. You can use the provided [config.json.example](con
   "label": "INBOX",
   "maildir_path": "/data/maildir",
   "retry_interval_minutes": 5,
+  "sync_mode": "idle",
+  "idle_fallback": true,
+  "idle_refresh_interval_minutes": 20,
+  "polling_interval_minutes": 5,
+  "http_endpoint_enabled": false,
+  "http_endpoint_port": 5000,
   "imap_action": "read",
   "move_to_folder": "",
   "search_criteria": "unseen"
@@ -50,6 +56,12 @@ Here is an example structure. You can use the provided [config.json.example](con
 | `label` | String | `INBOX` | GMail folder/label to sync. |
 | `maildir_path` | String | `/data` | Destination path where the Maildir structure will be built. (By defaulting to `/data`, the mountpoint itself becomes the Maildir). |
 | `retry_interval_minutes` | Integer | `5` | Minutes to wait before retrying the connection after network drops. |
+| `sync_mode` | String | `idle` | Connection mode to use. Options: `idle` (real-time IMAP IDLE) or `polling` (check at regular intervals). |
+| `idle_fallback` | Boolean | `true` | If `true`, falls back to `polling` mode if the IMAP server does not support IDLE. If `false`, stops the service. |
+| `idle_refresh_interval_minutes` | Integer | `20` | Interval to refresh the IMAP connection in IDLE mode to prevent socket timeouts. |
+| `polling_interval_minutes` | Integer | `5` | Wait time between sync attempts when `sync_mode` is set to `polling`. |
+| `http_endpoint_enabled` | Boolean | `false` | Enable or disable the local HTTP server to trigger manual synchronization. |
+| `http_endpoint_port` | Integer | `5000` | Port number for the local HTTP server if enabled. |
 | `imap_action` | String | `read` | Action to run on server after sync. Options: `keep` (do nothing), `read` (mark as read), `trash` (move to Trash folder, or delete as fallback), `move` (mark as read and move to folder specified in `move_to_folder`). |
 | `move_to_folder` | String | `""` | IMAP destination folder for the `move` action (e.g. `"INBOX/Archived"`, `"[Gmail]/All Mail"`). Required when `imap_action` is `move`. |
 | `search_criteria` | String | `unseen` | Controls which messages to sync. Options: `unseen` (only unread messages), `all` (all messages in the folder). |
@@ -72,6 +84,24 @@ Mount the parent maildir directory containing all mailboxes, and specify the use
 
 ---
 
+## Manual Synchronization via HTTP
+
+The daemon provides a simple, built-in HTTP server using FastAPI that allows you to trigger a manual synchronization independently of the automatic `idle` or `polling` loops. 
+
+To enable this feature, set `"http_endpoint_enabled": true` in your `config.json`. You can optionally change the port using `"http_endpoint_port": 5000`.
+
+### Triggering a Sync
+
+You can invoke the synchronization by making a simple HTTP GET request to the `/start-sync` endpoint:
+
+```bash
+curl http://localhost:5000/start-sync
+```
+
+**Concurrency Protection**: The endpoint is fully thread-safe. If a synchronization is already in progress (either triggered by the daemon or another manual request), the endpoint will immediately return an `ignored` status without interfering with the running sync.
+
+---
+
 ## Running with Docker Compose
 
 An example [docker-compose.yml](docker-compose.yml) is included in the project directory.
@@ -79,7 +109,7 @@ An example [docker-compose.yml](docker-compose.yml) is included in the project d
 ```yaml
 services:
   gmail-sync:
-    image: yourdockerusername/gmail-imap-sync:latest
+    image: skyma3x/gmail-imap-sync:latest
     container_name: gmail-imap-sync
     restart: unless-stopped
     environment:
